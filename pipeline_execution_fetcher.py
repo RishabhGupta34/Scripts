@@ -15,6 +15,32 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any
 
 
+def date_to_timestamp(date_str: str, end_of_day: bool = False) -> int:
+    """
+    Convert date string (YYYY-MM-DD) to millisecond timestamp.
+    
+    Args:
+        date_str: Date in YYYY-MM-DD format
+        end_of_day: If True, returns end of day (23:59:59.999), else start of day (00:00:00.000)
+    
+    Returns:
+        Timestamp in milliseconds
+    """
+    try:
+        dt = datetime.strptime(date_str, '%Y-%m-%d')
+        if end_of_day:
+            # Set to end of day: 23:59:59.999
+            dt = dt.replace(hour=23, minute=59, second=59, microsecond=999000)
+        else:
+            # Set to start of day: 00:00:00.000
+            dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Convert to UTC timestamp in milliseconds
+        return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
+    except ValueError:
+        raise ValueError(f"Invalid date format: {date_str}. Expected format: YYYY-MM-DD")
+
+
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -57,16 +83,24 @@ def parse_arguments():
         help='Output CSV file name (default: pipeline_executions.csv)'
     )
     parser.add_argument(
+        '--start-date',
+        type=str,
+        help='Start date in YYYY-MM-DD format (e.g., 2025-01-01). Will use start of day (00:00:00)'
+    )
+    parser.add_argument(
+        '--end-date',
+        type=str,
+        help='End date in YYYY-MM-DD format (e.g., 2025-12-31). Will use end of day (23:59:59)'
+    )
+    parser.add_argument(
         '--start-time',
         type=int,
-        default=1735689600000,
-        help='Start time in milliseconds (default: 1735669800000)'
+        help='Start time in milliseconds (alternative to --start-date)'
     )
     parser.add_argument(
         '--end-time',
         type=int,
-        default=1761125859000,
-        help='End time in milliseconds (default: 1761157799999)'
+        help='End time in milliseconds (alternative to --end-date)'
     )
     
     args = parser.parse_args()
@@ -77,6 +111,19 @@ def parse_arguments():
     
     if args.auth_token and args.api_key:
         parser.error("Cannot use both --auth-token and --api-key. Please provide only one.")
+    
+    # Convert dates to timestamps if provided
+    if args.start_date:
+        args.start_time = date_to_timestamp(args.start_date, end_of_day=False)
+    elif not args.start_time:
+        # Default to 30 days ago
+        args.start_time = 1735689600000
+    
+    if args.end_date:
+        args.end_time = date_to_timestamp(args.end_date, end_of_day=True)
+    elif not args.end_time:
+        # Default to current time
+        args.end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
     
     return args
 
@@ -196,14 +243,9 @@ def fetch_pipeline_executions(
     
     payload = {
         "filterType": "PipelineExecution",
-        "myDeployments": False,
         "timeRange": {
             "startTime": start_time,
             "endTime": end_time
-        },
-        "moduleProperties": {
-            "ci": {},
-            "cd": {}
         }
     }
     
@@ -225,13 +267,14 @@ def fetch_pipeline_executions(
         raise
 
 
-def extract_stage_data(layout_node_map: Dict[str, Any], env_filter: str = "Production") -> List[Dict[str, Any]]:
+def extract_stage_data(layout_node_map: Dict[str, Any], env_filter: str = "Production", execution_id: str = "") -> List[Dict[str, Any]]:
     """
     Extract stage data from layoutNodeMap, filtering by environment type.
     
     Args:
         layout_node_map: The layoutNodeMap from the API response
         env_filter: Environment type to filter (default: "Production")
+        execution_id: Execution ID for debugging
     
     Returns:
         List of stage data dictionaries
@@ -242,23 +285,30 @@ def extract_stage_data(layout_node_map: Dict[str, Any], env_filter: str = "Produ
         return stages
     
     for node_id, node_data in layout_node_map.items():
-        # Check if this is a stage node
-        if node_data.get('nodeType') == 'Deployment' or node_data.get('nodeType') == 'stage':
-            module_info = node_data.get('moduleInfo', {})
-            
+        module_info = node_data.get('moduleInfo', {})
+        
+        # Check if this node has CD module info
+        if 'cd' in module_info and module_info['cd']:
             # Filter by environment type
             env_type = module_info.get('cd', {}).get('infraExecutionSummary', {}).get('type')
             env_name = module_info.get('cd', {}).get('infraExecutionSummary', {}).get('name', '')
             
             # Check if it's a Production environment (not PreProduction)
             if env_type == env_filter:
+                # Get service name, leave blank if serviceInfo is null/missing
+                service_info = module_info.get('cd', {}).get('serviceInfo')
+                if service_info and isinstance(service_info, dict):
+                    service_name = service_info.get('displayName', '')
+                else:
+                    service_name = ''
+                
                 stage_info = {
                     'stage_name': node_data.get('name', ''),
                     'start_time': node_data.get('startTs'),
                     'end_time': node_data.get('endTs'),
                     'status': node_data.get('status', ''),
                     'environment_name': env_name,
-                    'service_name': module_info.get('cd', {}).get('serviceInfo', {}).get('displayName', '')
+                    'service_name': service_name
                 }
                 stages.append(stage_info)
     
@@ -324,7 +374,7 @@ def parse_execution_data(response_data: Dict[str, Any], base_url: str, account_i
         execution_end_time = execution.get('endTs')
         
         # Extract stages from layoutNodeMap
-        stages = extract_stage_data(layout_node_map)
+        stages = extract_stage_data(layout_node_map, execution_id=execution_id)
         
         # If no production stages found, skip this execution
         if not stages:
@@ -540,6 +590,8 @@ def main():
     print(f"Organization: {args.org_id}")
     print(f"Project: {args.project_id if args.project_id else 'ALL'}")
     print(f"Page size: {args.page_size}")
+    print(f"Time range: {format_timestamp(args.start_time)} to {format_timestamp(args.end_time)}")
+    print(f"Time range (epoch): {args.start_time} to {args.end_time}")
     print(f"Delay between calls: random 0.5-1.0s")
     print()
     
