@@ -327,23 +327,18 @@ def format_timestamp(timestamp_ms: int) -> str:
 
 
 def calculate_duration(start_ts: int, end_ts: int) -> str:
-    """Calculate duration between two timestamps."""
+    """Calculate duration between two timestamps in HH:MM:SS format."""
     if not start_ts or not end_ts:
         return ''
     
     duration_ms = end_ts - start_ts
-    duration_seconds = duration_ms / 1000.0
+    duration_seconds = int(duration_ms / 1000.0)
     
-    hours = int(duration_seconds // 3600)
-    minutes = int((duration_seconds % 3600) // 60)
-    seconds = round(duration_seconds % 60)
+    hours = duration_seconds // 3600
+    minutes = (duration_seconds % 3600) // 60
+    seconds = duration_seconds % 60
     
-    if hours > 0:
-        return f"{hours}h {minutes}m {seconds}s"
-    elif minutes > 0:
-        return f"{minutes}m {seconds}s"
-    else:
-        return f"{seconds}s"
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def parse_execution_data(response_data: Dict[str, Any], base_url: str, account_id: str, org_id: str, project_id: str) -> List[Dict[str, str]]:
@@ -389,13 +384,10 @@ def parse_execution_data(response_data: Dict[str, Any], base_url: str, account_i
                 f"/pipelines/{pipeline_identifier}/executions/{execution_id}/pipeline"
             )
             
-            # Create Excel hyperlink formula
-            excel_hyperlink = f'=HYPERLINK("{execution_url}", "URL")'
-            
             record = {
                 'Pipeline': execution.get('name', ''),
                 'Project ID': project_id,
-                'Execution URL': excel_hyperlink,
+                'Execution URL': execution_url,
                 'Service Name': stage['service_name'],
                 'End Time': format_timestamp(execution_end_time),
                 'Start Time': format_timestamp(execution_start_time),
