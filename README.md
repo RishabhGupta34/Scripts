@@ -82,9 +82,23 @@ python pipeline_execution_fetcher.py \
   --org-id "YOUR_ORG_ID"
 ```
 
+### Using Date Range (Recommended)
+
+Specify time range using readable date format:
+
+```bash
+python pipeline_execution_fetcher.py \
+  --api-key "YOUR_API_KEY" \
+  --account-id "YOUR_ACCOUNT_ID" \
+  --org-id "YOUR_ORG_ID" \
+  --project-id "YOUR_PROJECT_ID" \
+  --start-date "2025-01-01" \
+  --end-date "2025-12-31"
+```
+
 ### Advanced Usage with Custom Options
 
-Specify custom time range, output file, and page size:
+Specify custom time range using epoch timestamps, output file, and page size:
 
 ```bash
 python pipeline_execution_fetcher.py \
@@ -123,8 +137,12 @@ python pipeline_execution_fetcher.py \
 | `--project-id` | None | Specific project to query. If omitted, fetches all projects in the organization |
 | `--page-size` | 50 | Number of records to fetch per API call (1-100) |
 | `--output` | `pipeline_executions.csv` | Output CSV file name |
-| `--start-time` | Last 30 days | Start time in milliseconds since epoch (Unix timestamp × 1000) |
-| `--end-time` | Current time | End time in milliseconds since epoch (Unix timestamp × 1000) |
+| `--start-date` | None | Start date in YYYY-MM-DD format (e.g., `2025-01-01`). Uses start of day (00:00:00) |
+| `--end-date` | None | End date in YYYY-MM-DD format (e.g., `2025-12-31`). Uses end of day (23:59:59) |
+| `--start-time` | Last 30 days | Start time in milliseconds since epoch (alternative to `--start-date`) |
+| `--end-time` | Current time | End time in milliseconds since epoch (alternative to `--end-date`) |
+
+**Note:** Use either `--start-date`/`--end-date` (recommended for readability) OR `--start-time`/`--end-time` (for precise millisecond control).
 
 ## Output Format
 
@@ -134,15 +152,15 @@ The script generates a CSV file with the following structure:
 |--------|-------------|---------|
 | Pipeline | Pipeline name | `production-deployment` |
 | Project ID | Project identifier | `microservices` |
-| Execution URL | Clickable link to execution | `=HYPERLINK("https://...", "URL")` |
-| Service Name | Deployed service | `payment-service` |
+| Execution URL | Direct link to execution | `https://app.harness.io/ng/#/account/...` |
+| Service Name | Deployed service | `payment-service` (or blank if not applicable) |
 | End Time | Completion timestamp (UTC) | `2025-01-15 10:30:45` |
 | Start Time | Start timestamp (UTC) | `2025-01-15 10:25:30` |
 | Environment Name | Target environment | `Production` |
 | Status | Execution result | `Success`, `Failed`, `Aborted` |
-| Duration | Execution time | `5m 15s` |
+| Duration | Execution time (HH:MM:SS) | `00:05:15` |
 
-**Note:** The Execution URL column uses Excel's HYPERLINK formula for clickable links when opened in Excel or Google Sheets.
+**Note:** URLs are plain text and clickable in most spreadsheet applications.
 
 ## How It Works
 
@@ -151,7 +169,7 @@ The script generates a CSV file with the following structure:
 3. **Execution Retrieval**: Queries pipeline executions within the specified time range
 4. **Filtering**: Extracts only Production environment deployments
 5. **Data Processing**: Converts timestamps, calculates durations, formats data
-6. **CSV Generation**: Writes formatted data to CSV file with Excel-compatible hyperlinks
+6. **CSV Generation**: Writes formatted data to CSV file
 
 ## Important Notes
 
