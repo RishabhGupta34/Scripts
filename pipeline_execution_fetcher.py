@@ -83,6 +83,12 @@ def parse_arguments():
         help='Output CSV file name (default: pipeline_executions.csv)'
     )
     parser.add_argument(
+        '--exclude-projects',
+        nargs='+',
+        default=[],
+        help='List of project IDs to exclude (space-separated)'
+    )
+    parser.add_argument(
         '--start-date',
         type=str,
         help='Start date in YYYY-MM-DD format (e.g., 2025-01-01). Will use start of day (00:00:00)'
@@ -249,22 +255,41 @@ def fetch_pipeline_executions(
         }
     }
     
-    try:
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload
-        )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"\nError fetching pipeline executions: {e}", file=sys.stderr)
-        print(f"\nSample curl command to debug:", file=sys.stderr)
-        print(f"curl --location '{url}' \\", file=sys.stderr)
-        print(f"  --header 'Authorization: <YOUR_AUTH_TOKEN>' \\", file=sys.stderr)
-        print(f"  --header 'Content-Type: application/json' \\", file=sys.stderr)
-        print(f"  --data '{json.dumps(payload)}'", file=sys.stderr)
-        raise
+    # Retry logic with 3 attempts
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            # Try to get response body for more details
+            error_details = ""
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_body = e.response.text
+                    error_details = f"\nResponse body: {error_body[:500]}"
+                except:
+                    pass
+            
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 2  # 2, 4, 6 seconds
+                print(f"\n  Warning: API call failed (attempt {attempt + 1}/{max_retries}): {e}{error_details}", file=sys.stderr)
+                print(f"  Retrying in {wait_time} seconds...", file=sys.stderr)
+                time.sleep(wait_time)
+            else:
+                print(f"\nError fetching pipeline executions after {max_retries} attempts: {e}{error_details}", file=sys.stderr)
+                print(f"\nSample curl command to debug:", file=sys.stderr)
+                print(f"curl --location '{url}' \\", file=sys.stderr)
+                print(f"  --header 'Authorization: <YOUR_AUTH_TOKEN>' \\", file=sys.stderr)
+                print(f"  --header 'Content-Type: application/json' \\", file=sys.stderr)
+                print(f"  --data '{json.dumps(payload)}'", file=sys.stderr)
+                raise
 
 
 def extract_stage_data(layout_node_map: Dict[str, Any], env_filter: str = "Production", execution_id: str = "") -> List[Dict[str, Any]]:
@@ -400,16 +425,16 @@ def parse_execution_data(response_data: Dict[str, Any], base_url: str, account_i
     return records
 
 
-def write_to_csv(records: List[Dict[str, str]], output_file: str):
+def write_to_csv(records: List[Dict[str, str]], output_file: str, mode: str = 'w'):
     """
     Write records to CSV file.
     
     Args:
         records: List of record dictionaries
         output_file: Output CSV file path
+        mode: File mode - 'w' for write (with header), 'a' for append (no header)
     """
     if not records:
-        print("No records to write.")
         return
     
     fieldnames = [
@@ -424,12 +449,16 @@ def write_to_csv(records: List[Dict[str, str]], output_file: str):
         'Duration'
     ]
     
-    with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+    with open(output_file, mode, newline='', encoding='utf-8') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
+        if mode == 'w':
+            writer.writeheader()
         writer.writerows(records)
     
-    print(f"Successfully wrote {len(records)} records to {output_file}")
+    if mode == 'w':
+        print(f"Created CSV file: {output_file}")
+    else:
+        print(f"Appended {len(records)} records to {output_file}")
 
 
 def fetch_all_projects(base_url: str, auth_token: str, account_id: str, org_id: str, api_key: str = None) -> List[str]:
@@ -487,7 +516,7 @@ def fetch_all_projects(base_url: str, auth_token: str, account_id: str, org_id: 
     return all_projects
 
 
-def fetch_project_executions(
+def fetch_project_executions_batch(
     base_url: str,
     auth_token: str,
     account_id: str,
@@ -496,10 +525,11 @@ def fetch_project_executions(
     page_size: int,
     start_time: int,
     end_time: int,
-    api_key: str = None
+    api_key: str = None,
+    batch_label: str = ""
 ) -> List[Dict[str, str]]:
     """
-    Fetch all pipeline executions for a specific project.
+    Fetch pipeline executions for a specific project within a time range batch.
     
     Args:
         base_url: Base URL for the API
@@ -510,6 +540,8 @@ def fetch_project_executions(
         page_size: Number of records per page
         start_time: Start time in milliseconds
         end_time: End time in milliseconds
+        api_key: API key for authentication
+        batch_label: Label for the batch (for logging)
     
     Returns:
         List of execution records
@@ -540,7 +572,8 @@ def fetch_project_executions(
         
         # Print pagination info on first page
         if page == 0:
-            print(f"  Total pages: {total_pages}, Total executions: {total_elements}")
+            batch_info = f" [{batch_label}]" if batch_label else ""
+            print(f"  Total pages: {total_pages}, Total executions: {total_elements}{batch_info}")
         
         # Parse and collect records
         records = parse_execution_data(
@@ -569,6 +602,149 @@ def fetch_project_executions(
     return all_records
 
 
+def fetch_project_executions(
+    base_url: str,
+    auth_token: str,
+    account_id: str,
+    org_id: str,
+    project_id: str,
+    page_size: int,
+    start_time: int,
+    end_time: int,
+    api_key: str = None
+) -> List[Dict[str, str]]:
+    """
+    Fetch all pipeline executions for a specific project.
+    Automatically splits into batches if total count exceeds 10k.
+    
+    Args:
+        base_url: Base URL for the API
+        auth_token: Bearer authentication token
+        account_id: Account identifier
+        org_id: Organization identifier
+        project_id: Project identifier
+        page_size: Number of records per page
+        start_time: Start time in milliseconds
+        end_time: End time in milliseconds
+        api_key: API key for authentication
+    
+    Returns:
+        List of execution records
+    """
+    # First, check the total count
+    response_data = fetch_pipeline_executions(
+        base_url=base_url,
+        auth_token=auth_token,
+        account_id=account_id,
+        org_id=org_id,
+        project_id=project_id,
+        page=0,
+        page_size=page_size,
+        start_time=start_time,
+        end_time=end_time,
+        api_key=api_key
+    )
+    
+    page_info = response_data.get('data', {})
+    total_elements = page_info.get('totalElements', 0)
+    
+    # If total elements <= 10k, fetch normally
+    if total_elements <= 10000:
+        print(f"  Total executions: {total_elements} (within limit)")
+        
+        # Parse first page
+        all_records = parse_execution_data(
+            response_data,
+            base_url,
+            account_id,
+            org_id,
+            project_id
+        )
+        
+        total_pages = page_info.get('totalPages', 0)
+        print(f"  Processing page 1/{total_pages} - Found {len(all_records)} production stage records on this page")
+        
+        # Fetch remaining pages
+        for page in range(1, total_pages):
+            response_data = fetch_pipeline_executions(
+                base_url=base_url,
+                auth_token=auth_token,
+                account_id=account_id,
+                org_id=org_id,
+                project_id=project_id,
+                page=page,
+                page_size=page_size,
+                start_time=start_time,
+                end_time=end_time,
+                api_key=api_key
+            )
+            
+            records = parse_execution_data(
+                response_data,
+                base_url,
+                account_id,
+                org_id,
+                project_id
+            )
+            all_records.extend(records)
+            
+            print(f"  Processing page {page + 1}/{total_pages} - Found {len(records)} production stage records on this page")
+            
+            # Add random delay
+            delay = random.uniform(0.5, 1.0)
+            time.sleep(delay)
+        
+        return all_records
+    
+    # If total elements > 10k, split into 10-day batches
+    print(f"  Total executions: {total_elements} (exceeds 10k limit)")
+    print(f"  Splitting time range into 10-day batches...")
+    
+    all_records = []
+    batch_size_ms = 10 * 24 * 60 * 60 * 1000  # 10 days in milliseconds
+    current_start = start_time
+    batch_num = 1
+    
+    while current_start < end_time:
+        # Calculate batch end time (inclusive, so subtract 1ms from next batch start)
+        current_end = min(current_start + batch_size_ms - 1, end_time)
+        
+        # Format dates for logging
+        start_date = format_timestamp(current_start)
+        end_date = format_timestamp(current_end)
+        batch_label = f"Batch {batch_num}: {start_date} to {end_date}"
+        
+        print(f"\n  {batch_label}")
+        
+        # Fetch this batch
+        batch_records = fetch_project_executions_batch(
+            base_url=base_url,
+            auth_token=auth_token,
+            account_id=account_id,
+            org_id=org_id,
+            project_id=project_id,
+            page_size=page_size,
+            start_time=current_start,
+            end_time=current_end,
+            api_key=api_key,
+            batch_label=batch_label
+        )
+        
+        all_records.extend(batch_records)
+        print(f"  Batch {batch_num} complete: {len(batch_records)} production stage records")
+        
+        # Move to next batch (add 1ms to avoid overlap since end_time is inclusive)
+        current_start = current_end + 1
+        batch_num += 1
+        
+        # Add delay between batches
+        if current_start < end_time:
+            delay = random.uniform(0.5, 1.0)
+            time.sleep(delay)
+    
+    return all_records
+
+
 def main():
     """Main function to orchestrate the data fetching and CSV generation."""
     args = parse_arguments()
@@ -581,13 +757,16 @@ def main():
     print(f"Account: {args.account_id}")
     print(f"Organization: {args.org_id}")
     print(f"Project: {args.project_id if args.project_id else 'ALL'}")
+    if args.exclude_projects:
+        print(f"Excluding projects: {', '.join(args.exclude_projects)}")
     print(f"Page size: {args.page_size}")
     print(f"Time range: {format_timestamp(args.start_time)} to {format_timestamp(args.end_time)}")
     print(f"Time range (epoch): {args.start_time} to {args.end_time}")
     print(f"Delay between calls: random 0.5-1.0s")
     print()
     
-    all_records = []
+    total_records = 0
+    csv_initialized = False
     
     # Determine which projects to process
     if args.project_id:
@@ -595,13 +774,18 @@ def main():
         projects = [args.project_id]
     else:
         # Fetch all projects
-        projects = fetch_all_projects(
+        all_projects = fetch_all_projects(
             base_url=base_url,
             auth_token=args.auth_token,
             account_id=args.account_id,
             org_id=args.org_id,
             api_key=args.api_key
         )
+        # Filter out excluded projects
+        projects = [p for p in all_projects if p not in args.exclude_projects]
+        if args.exclude_projects:
+            excluded_count = len(all_projects) - len(projects)
+            print(f"Excluded {excluded_count} project(s)")
         print()
     
     # Process each project
@@ -620,8 +804,20 @@ def main():
             api_key=args.api_key
         )
         
-        all_records.extend(project_records)
+        # Write to CSV incrementally
+        if project_records:
+            if not csv_initialized:
+                # First write - create file with header
+                write_to_csv(project_records, args.output, mode='w')
+                csv_initialized = True
+            else:
+                # Subsequent writes - append without header
+                write_to_csv(project_records, args.output, mode='a')
+            
+            total_records += len(project_records)
+        
         print(f"  Found {len(project_records)} production stage records for project {project_id}")
+        print(f"  Total records written so far: {total_records}")
         print()
         
         # Add random delay between projects (except for the last one)
@@ -629,10 +825,11 @@ def main():
             delay = random.uniform(0.5, 1.0)
             time.sleep(delay)
     
-    print(f"Total production stage records collected: {len(all_records)}")
-    
-    # Write to CSV
-    write_to_csv(all_records, args.output)
+    print(f"Total production stage records collected: {total_records}")
+    if total_records > 0:
+        print(f"All records saved to: {args.output}")
+    else:
+        print("No records to write.")
 
 
 if __name__ == '__main__':
